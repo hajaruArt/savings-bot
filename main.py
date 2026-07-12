@@ -71,15 +71,12 @@ def send_telegram(msg):
 
 def already_processed(conn, update_id):
     with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM processed_updates WHERE update_id=%s", (update_id,))
-        if cur.fetchone():
-            return True
         cur.execute(
             "INSERT INTO processed_updates (update_id) VALUES (%s) ON CONFLICT DO NOTHING",
             (update_id,),
         )
         conn.commit()
-        return False
+        return cur.rowcount == 0
 
 
 def categorize_expense(details):
