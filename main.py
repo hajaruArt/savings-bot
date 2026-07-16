@@ -177,6 +177,17 @@ def handle_command(conn, text):
     now = datetime.now()
     d, tm = now.strftime("%Y-%m-%d"), now.strftime("%H:%M")
 
+    if re.match(r"^(مهام|المهام)$", t, re.I):
+        with conn.cursor() as cur:
+            cur.execute("SELECT task, date FROM tasks WHERE status='⏳ قيد التنفيذ' ORDER BY id DESC")
+            rows = cur.fetchall()
+        if rows:
+            lines = "\n".join(f"• {r['task']} ({r['date']})" for r in rows)
+            send_telegram(f"📋 مهامك المعلقة ({len(rows)}):\n\n{lines}")
+        else:
+            send_telegram("✅ ما عندك مهام معلقة")
+        return
+
     if re.match(r"^(أوامر|اوامر|الأوامر|أمر|مساعدة|help)$", t, re.I):
         send_telegram(
             "🤖 كل الأوامر المتاحة:\n\n"
@@ -191,7 +202,8 @@ def handle_command(conn, text):
             "• صحح: [التصنيف الصح]\n\n"
             "📋 المهام:\n"
             "• مهمة: [اسم المهمة]\n"
-            "• انتهت: [اسم المهمة]\n\n"
+            "• انتهت: [اسم المهمة]\n"
+            "• مهام (لعرض كل المهام المعلقة)\n\n"
             "📊 التقارير:\n"
             "• تقرير\n"
             "• أرصدة\n\n"
