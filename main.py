@@ -136,12 +136,18 @@ def account_from_number(num):
 CHARITY_KEYWORDS = ["خيري", "خيرية", "جمعيات", "جمعية", "تبرع", "صدقة"]
 
 
-def suggest_business_split(amt):
-    """يحسب المقترح فقط للعرض، بدون أي خصم فعلي من رصيد البزنس."""
+def split_business_income(conn, amt):
+    """يقسم دخل البزنس: استثمار + صدقة + مدخرات تُخصم فعلياً، والباقي يضل برصيد البزنس القابل للصرف."""
     invest = round(amt * INVEST_PERCENT, 2)
     sadaqah = round(amt * SADAQAH_PERCENT, 2)
     savings = round(amt * BUSINESS_SAVINGS_PERCENT, 2)
-    return invest, sadaqah, savings
+    net = round(amt - invest - sadaqah - savings, 2)
+
+    new_business = adjust_balance(conn, "business", net)
+    adjust_balance(conn, "investment", invest)
+    adjust_balance(conn, "sadaqah", sadaqah)
+    adjust_balance(conn, "savings", savings)
+    return new_business, invest, sadaqah, savings, net
 
 
 def record_expense(conn, d, tm, amt, category, details, account):
@@ -263,20 +269,20 @@ def handle_command(conn, text):
     m = re.match(r"^رصيد بزنس\s+([\d.]+)", t, re.I)
     if m:
         amt = float(m.group(1))
-        new_bal = adjust_balance(conn, "business", amt)
-        invest, sadaqah, savings = suggest_business_split(amt)
+        new_bal, invest, sadaqah, savings, net = split_business_income(conn, amt)
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO incomes (date,time,amount,type,details,account,invest) VALUES (%s,%s,%s,%s,%s,%s,0)",
-                (d, tm, amt, "دخل عمل", "أضيف يدوياً", "تجاري"),
+                "INSERT INTO incomes (date,time,amount,type,details,account,invest) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (d, tm, amt, "دخل عمل", "أضيف يدوياً", "تجاري", invest),
             )
             conn.commit()
         send_telegram(
             f"✅ دخل بزنس جديد: {fmt(amt)} ر.س\n"
-            f"💼 رصيد البزنس الحالي: {fmt(new_bal)} ر.س\n\n"
-            f"💡 مقترح (اختياري، ما يتخصم تلقائياً):\n"
-            f"📈 استثمار: {fmt(invest)} ر.س | 🤲 صدقة: {fmt(sadaqah)} ر.س | 💰 مدخرات: {fmt(savings)} ر.س\n"
-            f"لو نفذتيها فعلياً، سجليها بـ: اضافة استثمار/صدقة/مدخرات [مبلغ]"
+            f"📈 استثمار (10%): {fmt(invest)} ر.س\n"
+            f"🤲 صدقة (5%): {fmt(sadaqah)} ر.س\n"
+            f"💰 مدخرات (10%): {fmt(savings)} ر.س\n"
+            f"💼 صافي رصيد البزنس المضاف: {fmt(net)} ر.س\n"
+            f"💼 رصيد البزنس الحالي: {fmt(new_bal)} ر.س"
         )
         return
 
@@ -302,6 +308,32 @@ def handle_command(conn, text):
             new_bal = adjust_balance(conn, "business", -amt)
             record_expense(conn, d, tm, amt, "🔄 سحب بزنس", "سحب يدوي", "تجاري")
             send_telegram(f"💸 سحبت {fmt(amt)} ر.س من البزنس\n💼 المتبقي: {fmt(new_bal)} ر.س")
+        return
+
+    m = re.match(r"^ادخار\s+([\d.]+)", t, re.I)
+    if m:
+        amt = float(m.group(1))
+        current = get_balance(conn, "business")
+        if amt > current:
+            send_telegram(f"⚠️ رصيد البزنس غير كافٍ للادخار\n💼 رصيد البزنس: {fmt(current)} ر.س")
+        else:
+            new_biz = adjust_balance(conn, "business", -amt)
+            new_sav = adjust_balance(conn, "savings", amt)
+            send_telegram(
+                f"📈 تم نقل {fmt(amt)} ر.س من البزنس للمدخرات\n💼 رصيد البزنس المتبقي: {fmt(new_biz)} ر.س\n📈 صندوق المدخرات: {fmt(new_sav)} ر.س"
+            )
+        return
+
+    m = re.match(r"^استثمر\s+([\d.]+)", t, re.I)
+    if m:
+        amt = float(m.group(1))
+        current = get_balance(conn, "investment")
+        if amt > current:
+            send_telegram(f"⚠️ رصيد الاستثمار غير كافٍ\n📈 الاستثمار: {fmt(current)} ر.س")
+        else:
+            new_inv = adjust_balance(conn, "investment", -amt)
+            record_expense(conn, d, tm, amt, "📈 استثمار", "خصم من صندوق الاستثمار", "الاستثمار")
+            send_telegram(f"📈 تم استثمار {fmt(amt)} ر.س\n📈 صندوق الاستثمار المتبقي: {fmt(new_inv)} ر.س")
         return
 
     m = re.match(r"^مهمة[:\s]+(.+)", t, re.I)
@@ -508,19 +540,19 @@ def handle_sms(conn, sms):
     elif parsed["type"] == "مداخيل":
         acct = parsed["account"]
         if acct == "تجاري":
-            new_bal = adjust_balance(conn, "business", amt)
-            invest, sadaqah, savings = suggest_business_split(amt)
+            new_bal, invest, sadaqah, savings, net = split_business_income(conn, amt)
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO incomes (date,time,amount,type,details,account,invest) VALUES (%s,%s,%s,%s,%s,%s,0)",
-                    (d, tm, amt, "دخل عمل", parsed["details"], acct),
+                    "INSERT INTO incomes (date,time,amount,type,details,account,invest) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (d, tm, amt, "دخل عمل", parsed["details"], acct, invest),
                 )
                 conn.commit()
             send_telegram(
                 f"✅ دخل بزنس جديد: {fmt(amt)} ر.س\n"
-                f"💼 رصيد البزنس الحالي: {fmt(new_bal)} ر.س\n\n"
-                f"💡 مقترح (اختياري):\n"
-                f"📈 استثمار: {fmt(invest)} ر.س | 🤲 صدقة: {fmt(sadaqah)} ر.س | 💰 مدخرات: {fmt(savings)} ر.س"
+                f"📈 استثمار (10%): {fmt(invest)} ر.س\n"
+                f"🤲 صدقة (5%): {fmt(sadaqah)} ر.س\n"
+                f"💰 مدخرات (10%): {fmt(savings)} ر.س\n"
+                f"💼 رصيد البزنس الحالي: {fmt(new_bal)} ر.س"
             )
         else:
             new_bal = adjust_balance(conn, "personal", amt)
@@ -574,6 +606,13 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def home():
+    try:
+        conn = db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.close()
+    except Exception as e:
+        print("health check db ping error:", e)
     return "Bot is running"
 
 
